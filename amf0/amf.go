@@ -45,6 +45,7 @@ type Value struct {
 type Parser struct {
 	reader     io.Reader
 	references []*Value
+	bytesRead  int
 }
 
 func New(reader io.Reader) *Parser {
@@ -53,7 +54,7 @@ func New(reader io.Reader) *Parser {
 	}
 }
 
-func (p *Parser) Parse() (value *Value, err error) {
+func (p *Parser) Parse() (value *Value, bytesRead int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			e, ok := r.(error)
@@ -65,13 +66,13 @@ func (p *Parser) Parse() (value *Value, err error) {
 		}
 	}()
 
-	data := readBytes(p.reader, 1)
+	data := p.readBytes(p.reader, 1)
 	marker := Marker(data[0])
 	value = &Value{
 		Marker: marker,
 	}
 	p.parseValue(value)
-	return value, nil
+	return value, p.bytesRead, nil
 }
 
 func (p *Parser) parseValue(value *Value) {
@@ -79,7 +80,7 @@ func (p *Parser) parseValue(value *Value) {
 	case Number:
 		value.Value = p.readDouble()
 	case Boolean:
-		data := readBytes(p.reader, 1)
+		data := p.readBytes(p.reader, 1)
 		value.Value = data[0] != 0
 	case LongString, XmlDocument, String:
 		str, _ := p.readString(value.Marker)
@@ -90,7 +91,7 @@ func (p *Parser) parseValue(value *Value) {
 	case Null, Undefined:
 		value.Value = nil
 	case Reference:
-		data := readBytes(p.reader, 2)
+		data := p.readBytes(p.reader, 2)
 		index := binary.BigEndian.Uint16(data)
 		if int(index) > len(p.references)-1 {
 			panic("reference index is greater, than the amount of available reference objects")
@@ -100,16 +101,16 @@ func (p *Parser) parseValue(value *Value) {
 		value.Marker = ref.Marker
 	case ECMAArray:
 		// Length ignored, because assoc arrays should have 'ObjectEnd'
-		_ = readBytes(p.reader, 4)
+		_ = p.readBytes(p.reader, 4)
 		properties := p.parseProperties()
 		value.Value = properties
 		p.references = append(p.references, value)
 	case StrictArray:
 		// Length
-		data := readBytes(p.reader, 4)
+		data := p.readBytes(p.reader, 4)
 		length := int(binary.BigEndian.Uint32(data))
 		// Marker
-		data = readBytes(p.reader, 1)
+		data = p.readBytes(p.reader, 1)
 		arrayMarker := Marker(data[0])
 		// Collect
 		var values []*Value
@@ -123,8 +124,8 @@ func (p *Parser) parseValue(value *Value) {
 		value.Value = values
 	case Date:
 		// not supported
-		_ = readBytes(p.reader, 2)
-		data := readBytes(p.reader, 8)
+		_ = p.readBytes(p.reader, 2)
+		data := p.readBytes(p.reader, 8)
 		value.Value = math.Float64frombits(binary.BigEndian.Uint64(data))
 	case TypedObject:
 		// Class name
@@ -147,7 +148,7 @@ func (p *Parser) parseProperties() []*Value {
 		name, nameLength := p.readString(String)
 		// Check if 'ObjectEnd'
 		if nameLength == 0 {
-			data := readBytes(p.reader, 1)
+			data := p.readBytes(p.reader, 1)
 			// Should be always this way
 			if data[0] == ObjectEnd {
 				break
@@ -155,7 +156,7 @@ func (p *Parser) parseProperties() []*Value {
 				panic("i'm stupid and i fucked up")
 			}
 		}
-		data := readBytes(p.reader, 1)
+		data := p.readBytes(p.reader, 1)
 		marker := Marker(data[0])
 		property := &Value{
 			Marker: marker,
@@ -168,26 +169,27 @@ func (p *Parser) parseProperties() []*Value {
 }
 
 func (p *Parser) readDouble() float64 {
-	data := readBytes(p.reader, 8)
+	data := p.readBytes(p.reader, 8)
 	return math.Float64frombits(binary.BigEndian.Uint64(data))
 }
 
 func (p *Parser) readString(marker Marker) (string, int) {
 	var nameLength int32
 	if marker == String {
-		data := readBytes(p.reader, 2)
+		data := p.readBytes(p.reader, 2)
 		nameLength = int32(binary.BigEndian.Uint16(data))
 	} else if marker == LongString || marker == XmlDocument {
-		data := readBytes(p.reader, 4)
+		data := p.readBytes(p.reader, 4)
 		nameLength = int32(binary.BigEndian.Uint32(data))
 	}
-	data := readBytes(p.reader, int(nameLength))
+	data := p.readBytes(p.reader, int(nameLength))
 	return string(data), int(nameLength)
 }
 
-func readBytes(reader io.Reader, length int) []byte {
+func (p *Parser) readBytes(reader io.Reader, length int) []byte {
 	buffer := make([]byte, length)
-	_, err := io.ReadFull(reader, buffer)
+	n, err := io.ReadFull(reader, buffer)
+	p.bytesRead += n
 	if err != nil {
 		panic(err)
 	}
